@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple, Optional
 import structlog
 from pathlib import Path
 import mediapipe as mp
-from app.services.pose_analysis import extract_landmarks, detect_swing_events
+from .pose_analysis import extract_landmarks, detect_swing_events, analyze_swing
 
 logger = structlog.get_logger()
 
@@ -24,7 +24,8 @@ class SnapshotGenerator:
                  skeleton_color: Tuple[int, int, int] = (0, 255, 0),
                  skeleton_thickness: int = 2,
                  landmark_color: Tuple[int, int, int] = (255, 0, 0),
-                 landmark_radius: int = 3):
+                 landmark_radius: int = 3,
+                 use_smart_detection: bool = True):
         """
         Initialize the snapshot generator.
         
@@ -34,7 +35,9 @@ class SnapshotGenerator:
             skeleton_thickness: Thickness of skeleton lines
             landmark_color: BGR color for landmark points (default: red)
             landmark_radius: Radius of landmark circles
+            use_smart_detection: Whether to use smart detection methods
         """
+        self.use_smart_detection = use_smart_detection
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -51,7 +54,8 @@ class SnapshotGenerator:
             "SnapshotGenerator initialized",
             output_dir=str(self.output_dir),
             skeleton_color=skeleton_color,
-            landmark_color=landmark_color
+            landmark_color=landmark_color,
+            use_smart_detection=use_smart_detection
         )
 
     def draw_skeleton(self, frame: np.ndarray, landmarks: List[Dict]) -> np.ndarray:
@@ -248,20 +252,70 @@ class SnapshotGenerator:
         Returns:
             Dictionary mapping event names to saved image paths
         """
-        logger.info("Starting complete swing snapshot generation", video_path=video_path)
+        logger.info("Starting complete swing snapshot generation", video_path=video_path, use_smart_detection=self.use_smart_detection)
         
-        # Extract landmarks
-        landmarks_data = extract_landmarks(video_path)
-        
-        # Detect swing events
-        swing_events = detect_swing_events(landmarks_data)
+        if self.use_smart_detection:
+            # Use new advanced pose analysis for better event detection
+            try:
+                from .advanced_golf_processor import process_golf_swing_video_advanced
+                
+                # Process video with advanced analysis
+                result = process_golf_swing_video_advanced(
+                    video_path=video_path,
+                    output_dir=str(self.output_dir),
+                    min_detection_confidence=0.7,
+                    min_tracking_confidence=0.7,
+                    target_fps=60
+                )
+                
+                if result.success:
+                    # Convert to the expected format
+                    swing_events = {
+                        "setup": result.events["setup"].frame_index,
+                        "top_backswing": result.events["top_backswing"].frame_index,
+                        "impact": result.events["impact"].frame_index,
+                        "follow_through": result.events["follow_through"].frame_index
+                    }
+                    
+                    # Convert frames_data to landmarks_data format for compatibility
+                    landmarks_data = []
+                    for frame_data in result.frames_data:
+                        landmarks_data.append({
+                            "frame_index": frame_data.frame_index,
+                            "timestamp": frame_data.timestamp,
+                            "landmarks": [
+                                {
+                                    "x": landmark.x,
+                                    "y": landmark.y,
+                                    "z": landmark.z,
+                                    "visibility": landmark.visibility
+                                }
+                                for landmark in frame_data.landmarks
+                            ]
+                        })
+                    
+                    logger.info("Advanced pose analysis completed", events=swing_events)
+                    
+                else:
+                    raise Exception(f"Advanced processing failed: {result.error_message}")
+                
+            except Exception as e:
+                logger.warning("Advanced pose analysis failed, falling back to original method", error=str(e))
+                # Fall back to original method
+                landmarks_data = extract_landmarks(video_path)
+                swing_events = detect_swing_events(landmarks_data)
+        else:
+            # Use original method
+            landmarks_data = extract_landmarks(video_path)
+            swing_events = detect_swing_events(landmarks_data)
         
         # Generate snapshots
         snapshots = self.extract_event_snapshots(video_path, swing_events, landmarks_data)
         
         logger.info(
             "Complete swing snapshot generation finished",
-            snapshots_generated=len(snapshots)
+            snapshots_generated=len(snapshots),
+            use_smart_detection=self.use_smart_detection
         )
         
         return snapshots
@@ -381,18 +435,19 @@ def extract_event_snapshots(video_path: str,
     return generator.extract_event_snapshots(video_path, events, landmarks_data)
 
 
-def generate_swing_snapshots(video_path: str, output_dir: str = "outputs") -> Dict[str, str]:
+def generate_swing_snapshots(video_path: str, output_dir: str = "outputs", use_smart_detection: bool = False) -> Dict[str, str]:
     """
     Complete pipeline: extract landmarks, detect events, generate snapshots.
     
     Args:
         video_path: Path to the input video file
         output_dir: Directory to save snapshots
+        use_smart_detection: Whether to use smart detection methods
         
     Returns:
         Dictionary mapping event names to saved image paths
     """
-    generator = SnapshotGenerator(output_dir=output_dir)
+    generator = SnapshotGenerator(output_dir=output_dir, use_smart_detection=use_smart_detection)
     return generator.generate_swing_snapshots(video_path)
 
 
