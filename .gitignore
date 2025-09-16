@@ -149,3 +149,4 @@ alembic/versions/*.py
 
 # Test files
 test.db
+outputs/
